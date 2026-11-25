@@ -567,6 +567,7 @@ class Accounts:
         推荐格式：JSON 数组，每项为账号对象：
             [{"name": "", "origin": "", "cookie": "...", "user-agent": ""}]
 
+        单账号也可以直接使用同结构的 JSON 对象，无需外层数组。
         cookie 必填且不能为空；name / origin / user-agent 可省略或留空。
         另外兼容旧版 `&` 分隔格式，但每次解析都会提示尽快迁移。
         """
@@ -584,10 +585,12 @@ class Accounts:
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError as e:
-            raise ValueError(f"不是合法 JSON（只支持 JSON 数组格式）：{e}") from e
+            raise ValueError(f"不是合法 JSON（支持账号对象或账号数组）：{e}") from e
 
+        if isinstance(parsed, dict):
+            parsed = [parsed]
         if not isinstance(parsed, list):
-            raise ValueError("只支持 JSON 数组格式：[{...}, {...}]")
+            raise ValueError("只支持 JSON 账号对象或账号数组：{...} / [{...}, {...}]")
         if not parsed:
             raise ValueError("账号数组为空")
 
@@ -1402,7 +1405,7 @@ def write_actions_summary(report: Report) -> None:
         return
     lines = ["## GLaDOS 签到结果", "", "全部账号完成。" if report.ok else "本轮未全部完成，请检查日志。", ""]
     if report.error:
-        lines.extend(["配置加载或运行异常；请先确认 Repository secret `GLADOS_COOKIES` 已保存且为 JSON 数组。", ""])
+        lines.extend(["配置加载或运行异常；请先确认 Repository secret `GLADOS_COOKIES` 已保存且为 JSON 账号对象或账号数组。", ""])
     for entry in report.entries:
         result = entry.result
         status = STATUS_META.get(result.code, STATUS_META[CheckinStatus.FAILURE])[1]

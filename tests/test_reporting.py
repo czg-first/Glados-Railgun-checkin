@@ -48,12 +48,24 @@ class ResultReportingTests(unittest.TestCase):
         self.assertEqual(self.run_main(checkin.Report([])), 1)
 
     def test_missing_and_invalid_config_fail_without_network(self):
-        for raw in ("", "invalid", "[]", '{"cookie":"gld:sess=synthetic-test-only"}'):
+        for raw in ("", "invalid", "[]", "{}"):
             with self.subTest(raw=raw), patch.dict(os.environ, {"GLADOS_COOKIES": raw}, clear=True), patch.object(checkin, "init_logger"), patch.object(checkin.PushService, "send"), patch.object(checkin.CheckinRunner, "run") as runner:
                 with self.assertRaises(SystemExit) as caught:
                     checkin.main()
                 self.assertEqual(caught.exception.code, 1)
                 runner.assert_not_called()
+
+    def test_single_account_object_is_supported(self):
+        raw = '{"origin":"glados.one","cookie":"gld:sess=synthetic-test-only","user-agent":"test browser"}'
+        account = next(iter(checkin.Accounts.parse(raw)))
+        self.assertEqual(account.origin, "glados.one")
+        self.assertEqual(account.cookie, "gld:sess=synthetic-test-only")
+        self.assertEqual(account.user_agent, "test browser")
+
+    def test_single_account_object_still_validates_fields(self):
+        for raw in ('{"cookie":"not-a-session"}', '{"cookie":"gld:sess=synthetic-test-only","unexpected":true}'):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                checkin.Accounts.parse(raw)
 
     def test_rejection_cannot_be_overridden_by_repeat_flags(self):
         for code in (-2, "-2", 4, 5, 500):
