@@ -92,6 +92,26 @@ Chrome 不允许扩展写入自己的安装目录，所以首次更新需要你�
 
 ## 🔧配置 GLADOS_COOKIES
 
+### 本仓库首次启用（glados.one）
+
+1. 登录你实际使用的 `https://glados.one/console/checkin`，从浏览器 Network 的请求头复制完整 `Cookie` 和同一请求的 `User-Agent`。
+2. 打开仓库 **Settings → Secrets and variables → Actions → New repository secret**，名称必须为 `GLADOS_COOKIES`。请保存为 Secret，不要保存在 Variables、代码、Issue 或运行日志里。
+3. 值使用下方 JSON 数组，将 `origin` 设置为 `glados.one`，并填入上一步的完整 Cookie 与 UA。
+4. 在 **Actions → GLaDOS Check-in → Run workflow** 手动运行一次，查看运行摘要和 `Running checkin` 日志。显示「加载了 0 个账号」说明凭证尚未传入；仅安装依赖或保活成功不代表已签到。
+5. 到官网积分流水核对当天的签到入账。接口成功但积分偏少时，摘要会提示确认；遇到 Cloudflare/Turnstile 拒绝，需要在官网完成验证。
+
+```json
+[
+  {
+    "origin": "glados.one",
+    "cookie": "替换为已登录浏览器的完整 Cookie",
+    "user-agent": "替换为同一浏览器的完整 User-Agent"
+  }
+]
+```
+
+本仓库会在任一账号签到失败、配置错误或运行异常时返回非零退出码，使 Action 标红；全部账号成功或当天已签才显示绿色。运行摘要不包含 Cookie、UA、账号名或原始响应。摘要仍以接口回执为依据，官网流水是最终核对依据。
+
 必须是 **JSON 数组**，每个账号一个对象，只允许下面四个字段：
 
 ```json
@@ -317,7 +337,7 @@ GLaDOS 会校验 UA 与登录设备。填了 `user-agent` 就原样使用；没�
 <details>
 <summary><strong>Q：签到失败会让 Actions 变红吗？</strong></summary>
 
-分两种情况：**配置错误**（未填 Cookie、JSON 格式非法）会以非 0 退出码结束，工作流变红；**业务失败**（Cookie 失效 `code=-2`、服务端 5xx）不会变红，避免偶发失败天天误报。因此业务失败需要自己关注推送或日志。
+会。**配置错误**（未填 Cookie、JSON 格式非法）、**任一账号业务失败**（Cookie 失效 `code=-2`、服务端拒绝或网络故障）及运行异常都会返回非零退出码。全部账号成功或「当天已签到」才算本轮成功；单纯的推送或摘要写入失败不改变签到结果。积分偏少会单独提醒，仍需核对官网流水。
 
 </details>
 

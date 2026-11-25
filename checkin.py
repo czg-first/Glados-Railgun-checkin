@@ -1,5 +1,6 @@
 import functools
 import hashlib
+import html
 import json
 import logging
 import os
@@ -704,7 +705,7 @@ def parse_checkin(raw: Optional[Dict], domain: str, log: Callable[..., None], ua
         return result
 
     code = raw.get("code")
-    if isinstance(code, str) and code.strip().isdigit():
+    if isinstance(code, str) and re.fullmatch(r"[+-]?\d+", code.strip()):
         code = int(code.strip())
     message = str(raw.get("message", "无消息字段"))
     points = earned_points(raw)
@@ -722,6 +723,14 @@ def parse_checkin(raw: Optional[Dict], domain: str, log: Callable[..., None], ua
     # ① 设备不匹配
     if code == 4 and raw.get("reason") == "device-mismatch":
         log_reject(4, raw, message, domain, log, ua_hint)
+        return result
+
+    # 只有明确的成功/重复状态码才可计为完成，拒绝码不能被 repeated 覆盖。
+    if isinstance(code, bool) or not isinstance(code, int):
+        log(LogEmoji.ERROR, "签到响应没有有效的整数 code，无法判定结果", True)
+        return result
+    if code not in (CheckinStatus.SUCCESS.value, CheckinStatus.REPEAT.value):
+        log_reject(code, raw, message, domain, log, ua_hint)
         return result
 
     # ②~④ ：repeated「已签到」，code==0 成功
@@ -1211,6 +1220,14 @@ class Report:
         return cls(Accounts(), error=error)
 
     @property
+    def ok(self) -> bool:
+        """所有账号均成功或已签到才算本轮成功；空报告不能通过。"""
+        return bool(self.entries) and not self.error and all(
+            entry.result.code in (CheckinStatus.SUCCESS, CheckinStatus.REPEAT)
+            for entry in self.entries
+        )
+
+    @property
     def title(self) -> str:
         success = sum(1 for e in self.entries if e.result.code is CheckinStatus.SUCCESS)
         repeat = sum(1 for e in self.entries if e.result.code is CheckinStatus.REPEAT)
@@ -1378,6 +1395,31 @@ class CheckinRunner:
 # --------------------------------------------------------------------------- #
 
 
+def write_actions_summary(report: Report) -> None:
+    """只输出结果字段；账号名、Cookie、UA 与原始响应不进入公开摘要。"""
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+    lines = ["## GLaDOS 签到结果", "", "全部账号完成。" if report.ok else "本轮未全部完成，请检查日志。", ""]
+    if report.error:
+        lines.extend(["配置加载或运行异常；请先确认 Repository secret `GLADOS_COOKIES` 已保存且为 JSON 数组。", ""])
+    for entry in report.entries:
+        result = entry.result
+        status = STATUS_META.get(result.code, STATUS_META[CheckinStatus.FAILURE])[1]
+        domain = html.escape(result.domain)
+        lines.append(f"- 账号 {entry.index}：{status}；{domain}；本次 {result.points} 积分；剩余 {format_days(result.days)}。")
+        if result.turnstile or "Cloudflare" in result.note or "Turnstile" in result.note:
+            lines.append("  - 需要在官网完成验证；本次不保证获得完整积分。")
+        elif result.code is CheckinStatus.SUCCESS and result.points <= 1:
+            lines.append("  - 本次积分偏少，可能受到自动签到限制，请核对官网积分流水。")
+    lines.extend(["", "以上为签到接口回执；是否入账以官网积分流水为准。", ""])
+    try:
+        with open(summary_path, "a", encoding="utf-8") as summary:
+            summary.write("\n".join(lines))
+    except OSError:
+        logger.warning("无法写入 Actions 摘要，请查看签到日志。")
+
+
 def main() -> None:
     """主流程：加载配置 → 签到 → 渲染报告 → 推送"""
     init_logger()
@@ -1400,12 +1442,16 @@ def main() -> None:
 
             logger.info(f"{LogEmoji.START} 步骤 3: 生成报告")
             logger.info(f"\n{LogEmoji.END} ========== 签到总结 ==========\n{report.title}\n{report.render()}")
+            if not report.ok:
+                exit_code = 1
 
     except Exception as e:  # noqa: BLE001 - 顶层兜底，保证仍能推送错误摘要
         logger.error(f"{LogEmoji.ERROR} 主程序执行过程中发生未预期的错误: {e}")
         # 保留已完成账号的结果，避免一个异常吞掉全部进度
         report = Report(config.accounts, error=str(e)) if config is not None and config.accounts else Report.failed(str(e))
         exit_code = 1
+
+    write_actions_summary(report)
 
     # 推送放在 try 之外：即使配置解析失败，也要尽力把错误通知出去
     logger.info(f"{LogEmoji.START} 步骤 4: 发送推送")
