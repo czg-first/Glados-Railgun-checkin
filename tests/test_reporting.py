@@ -52,6 +52,8 @@ class ResultReportingTests(unittest.TestCase):
             report = self.report(checkin.CheckinStatus.SUCCESS)
             report.entries[0].result.today_points = observed
             self.assertFalse(report.ok)
+            self.assertIn("成功 0 · 失败 1", report.title)
+            self.assertIn("入账待核对", report.render())
             self.assertEqual(self.run_main(report), 1)
 
     def test_missing_and_invalid_config_fail_without_network(self):

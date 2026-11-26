@@ -287,6 +287,10 @@ class CheckinResult:
     def failure(cls, domain: str = UNPROBED) -> "CheckinResult":
         return cls(domain=domain)
 
+    @property
+    def verified(self) -> bool:
+        return self.code in (CheckinStatus.SUCCESS, CheckinStatus.REPEAT) and self.today_points is not None and self.today_points > 0
+
 
 @dataclass()
 class CookieEntry:
@@ -427,6 +431,8 @@ class CookieEntry:
         """输出单账号结论：成功 ✅、重复 🔄、失败 ⚠️"""
         r = self.result
         status = STATUS_META.get(r.code, (LogEmoji.ERROR, "签到失败"))[1]
+        if r.code in (CheckinStatus.SUCCESS, CheckinStatus.REPEAT) and not r.verified:
+            status = "接口已受理，入账待核对"
         parts = [f"结果: {status}"]
         if r.code is CheckinStatus.SUCCESS and self.verbose:
             parts += [f"获得 {r.points} 积分", f"剩余 {format_days(r.days)}", f"总 {format_points(r.points_total)}"]
@@ -1263,18 +1269,17 @@ class Report:
 
     @property
     def ok(self) -> bool:
-        """所有账号均成功或已签到才算本轮成功；空报告不能通过。"""
+        """全部账号成功或已签，且核实今日正数签到入账；空报告不能通过。"""
         return bool(self.entries) and not self.error and all(
-            entry.result.code in (CheckinStatus.SUCCESS, CheckinStatus.REPEAT)
-            and entry.result.today_points is not None and entry.result.today_points > 0
+            entry.result.verified
             for entry in self.entries
         )
 
     @property
     def title(self) -> str:
-        success = sum(1 for e in self.entries if e.result.code is CheckinStatus.SUCCESS)
-        repeat = sum(1 for e in self.entries if e.result.code is CheckinStatus.REPEAT)
-        failed = sum(1 for e in self.entries if e.result.code is CheckinStatus.FAILURE)
+        success = sum(1 for e in self.entries if e.result.code is CheckinStatus.SUCCESS and e.result.verified)
+        repeat = sum(1 for e in self.entries if e.result.code is CheckinStatus.REPEAT and e.result.verified)
+        failed = len(self.entries) - success - repeat
 
         if self.error:
             # 部分失败时仍保留进度统计，只有完全没跑起来才只报错误
@@ -1290,6 +1295,8 @@ class Report:
         for entry in self.entries:
             r = entry.result
             emoji, status = STATUS_META.get(r.code, (LogEmoji.ERROR, "签到失败"))
+            if r.code in (CheckinStatus.SUCCESS, CheckinStatus.REPEAT) and not r.verified:
+                emoji, status = LogEmoji.WARNING, "入账待核对"
             name_cell = f"{entry.name or '未命名'}  " if show_name else ""
             line = f"#{entry.index}  {name_cell}{emoji} {status}  {r.domain}  " f"获得 {r.points} 积分 · 剩余 {format_days(r.days)} · 总 {format_points(r.points_total)}"
             if r.exchange:
@@ -1450,6 +1457,8 @@ def write_actions_summary(report: Report) -> None:
     for entry in report.entries:
         result = entry.result
         status = STATUS_META.get(result.code, STATUS_META[CheckinStatus.FAILURE])[1]
+        if result.code in (CheckinStatus.SUCCESS, CheckinStatus.REPEAT) and not result.verified:
+            status = "接口已受理，入账待核对"
         domain = html.escape(result.domain)
         lines.append(f"- 账号 {entry.index}：{status}；{domain}；本次 {result.points} 积分；剩余 {format_days(result.days)}。")
         if result.today_points is None:
