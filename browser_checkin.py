@@ -57,11 +57,15 @@ def run_account(browser, entry):
     if entry.user_agent:
         options["user_agent"] = entry.user_agent
     context = browser.new_context(**options)
+    page = None
+    stage = "初始化会话"
     try:
         context.add_cookies(cookie_records(entry.cookie, origin))
         page = context.new_page()
+        stage = "打开官网签到页"
         page.goto(origin + "/console/checkin", wait_until="domcontentloaded", timeout=60000)
 
+        stage = "读取官网今日签到流水"
         data = read_points(page)
         observed = today_checkin_points(data)
         if observed is not None and observed > 0:
@@ -71,13 +75,17 @@ def run_account(browser, entry):
         button = page.locator("button.ckb").or_(
             page.get_by_role("button", name=re.compile(r"^(签到|check\s*-?\s*in)$", re.I))
         ).first
+        stage = "等待官网签到按钮"
         button.wait_for(state="visible", timeout=25000)
         # Only the ordinary site check-in button is clicked. Verification widgets
         # remain controlled by the official page and are never interacted with.
+        stage = "点击官网按钮并等待最终签到响应"
         with page.expect_response(lambda response: is_checkin_response(response, host), timeout=65000) as pending:
             button.click(timeout=20000)
+            logger.info("账号 %s：已点击官网签到按钮，等待最终 POST 回执。", entry.index)
         result = parse_checkin(pending.value.json(), host, lambda emoji, message, *args: entry.log(host, emoji, message, force=True))
 
+        stage = "核实签到后的官网流水"
         for attempt in range(3):
             data = read_points(page)
             result.today_points = today_checkin_points(data)
@@ -95,6 +103,14 @@ def run_account(browser, entry):
             result.code = CheckinStatus.FAILURE
             result.note = "接口回执尚未被官网今日签到流水证实。"
         return result
+    except Exception:
+        try:
+            buttons = page.locator("button.ckb").count() if page else 0
+            verification_frames = page.locator("iframe[src*='challenges.cloudflare.com']").count() if page else 0
+            logger.warning("账号 %s：停止阶段=%s；签到按钮数量=%s；Cloudflare 验证框数量=%s。", entry.index, stage, buttons, verification_frames)
+        except Exception:
+            logger.warning("账号 %s：停止阶段=%s。", entry.index, stage)
+        raise
     finally:
         context.close()
 

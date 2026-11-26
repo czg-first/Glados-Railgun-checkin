@@ -82,10 +82,10 @@ jobs:
       id: browser
       if: ${{ !cancelled() && steps.http.outcome == 'failure' }}
       continue-on-error: true
-      run: python browser_checkin.py
+      run: xvfb-run -a python browser_checkin.py
       env:
         GLADOS_COOKIES: ${{ secrets.GLADOS_COOKIES }}
-        BROWSER_HEADLESS: 'true'
+        BROWSER_HEADLESS: 'false'
 
     - name: Require verified check-in credit
       if: ${{ !cancelled() }}
