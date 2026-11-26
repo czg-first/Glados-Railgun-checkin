@@ -38,13 +38,16 @@ def is_checkin_response(response, host):
 
 def read_points(page):
     try:
-        return page.evaluate("""async () => {
+        data = page.evaluate("""async () => {
             const response = await fetch('/api/user/points', {
                 credentials: 'include', cache: 'no-store', signal: AbortSignal.timeout(15000)
             });
             return response.ok ? await response.json() : null;
         }""")
-    except Exception:
+        logger.info("官网积分接口：code=%s；今日签到入账=%s。", to_int(data.get("code")) if isinstance(data, dict) else None, today_checkin_points(data))
+        return data
+    except Exception as error:
+        logger.warning("浏览器读取官网流水失败（%s）。", type(error).__name__)
         return None
 
 
@@ -62,6 +65,14 @@ def run_account(browser, entry):
     try:
         context.add_cookies(cookie_records(entry.cookie, origin))
         page = context.new_page()
+        def observe_response(response):
+            path = urlsplit(response.url).path
+            if path in {"/api/user/checkin", "/api/user/checkin/challenge", "/api/user/status", "/api/user/points"}:
+                logger.info("官网请求：%s %s HTTP=%s。", response.request.method, path, response.status)
+            elif urlsplit(response.url).hostname == "challenges.cloudflare.com":
+                logger.info("Cloudflare 官方组件 HTTP=%s。", response.status)
+        page.on("response", observe_response)
+        page.on("pageerror", lambda error: logger.warning("官网页面脚本错误（%s）。", type(error).__name__))
         stage = "打开官网签到页"
         page.goto(origin + "/console/checkin", wait_until="domcontentloaded", timeout=60000)
 
@@ -80,7 +91,9 @@ def run_account(browser, entry):
         # Only the ordinary site check-in button is clicked. Verification widgets
         # remain controlled by the official page and are never interacted with.
         stage = "点击官网按钮并等待最终签到响应"
-        with page.expect_response(lambda response: is_checkin_response(response, host), timeout=65000) as pending:
+        # The official page can wait 90 seconds for interactive verification,
+        # followed by its own POST timeout. Do not cut the page off at 65 seconds.
+        with page.expect_response(lambda response: is_checkin_response(response, host), timeout=150000) as pending:
             button.click(timeout=20000)
             logger.info("账号 %s：已点击官网签到按钮，等待最终 POST 回执。", entry.index)
         result = parse_checkin(pending.value.json(), host, lambda emoji, message, *args: entry.log(host, emoji, message, force=True))
