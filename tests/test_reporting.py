@@ -14,7 +14,7 @@ class ResultReportingTests(unittest.TestCase):
         entries = []
         for index, status in enumerate(statuses, 1):
             entry = checkin.CookieEntry.build(index, first.cookie, origin="glados.one")
-            entry.result = checkin.CheckinResult(domain="glados.one", code=status, points=10)
+            entry.result = checkin.CheckinResult(domain="glados.one", code=status, points=10, today_points=10)
             entries.append(entry)
         return checkin.Report(entries)
 
@@ -46,6 +46,13 @@ class ResultReportingTests(unittest.TestCase):
     def test_empty_report_is_not_success(self):
         self.assertFalse(checkin.Report([]).ok)
         self.assertEqual(self.run_main(checkin.Report([])), 1)
+
+    def test_receipt_without_today_credit_does_not_pass(self):
+        for observed in (None, 0):
+            report = self.report(checkin.CheckinStatus.SUCCESS)
+            report.entries[0].result.today_points = observed
+            self.assertFalse(report.ok)
+            self.assertEqual(self.run_main(report), 1)
 
     def test_missing_and_invalid_config_fail_without_network(self):
         for raw in ("", "invalid", "[]", "{}"):

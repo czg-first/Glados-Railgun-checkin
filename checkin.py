@@ -3,11 +3,13 @@ import hashlib
 import html
 import json
 import logging
+import math
 import os
 import re
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
@@ -16,7 +18,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from logging_config import init_logger
+from logging_config import BEIJING_TZ, init_logger
 
 # --------------------------------------------------------------------------- #
 # 常量与枚举
@@ -275,6 +277,7 @@ class CheckinResult:
     points: int = 0  # 本次签到所得积分
     days: Optional[int] = None  # 剩余天数；None 表示未取到
     points_total: Optional[int] = None  # 账户总积分；None 表示未取到
+    today_points: Optional[float] = None  # 官网今日明确标为签到的正数入账；None 为未能核对
     exchange: str = ""  # 仅在真正执行兑换时才有值，不含「未配置」这类配置状态
     note: str = ""  # 附加提示（如剩余天数偏少）
     turnstile: bool = False  # 服务端要求 Turnstile，纯 HTTP 无法完成
@@ -378,6 +381,7 @@ class CookieEntry:
 
         self.log(domain, LogEmoji.POINTS, "查询总积分")
         result.points_total = api.get_points()
+        result.today_points = api.today_points
 
         # 签到没成功就去兑换，只会白花积分或再吃一次拒绝，故仅成功/重复时兑换
         if result.code in (CheckinStatus.SUCCESS, CheckinStatus.REPEAT):
@@ -393,6 +397,8 @@ class CookieEntry:
             notes.append(EXTENSION_FALLBACK_HINT)
         elif api.challenge_missing and result.points <= 1:
             notes.append(EXTENSION_FALLBACK_HINT)
+        if result.code in (CheckinStatus.SUCCESS, CheckinStatus.REPEAT) and not (result.today_points and result.today_points > 0):
+            notes.append("尚未核实官网今日签到入账")
         result.note = "；".join(notes)
         return result
 
@@ -674,6 +680,36 @@ def earned_points(raw: Dict) -> int:
     return 0
 
 
+def today_checkin_points(payload: Any, now: Optional[datetime] = None) -> Optional[float]:
+    """只核对北京时间今日的明确签到流水，不把补偿、退款等当作签到。"""
+    if not isinstance(payload, dict) or isinstance(payload.get("code"), bool) or payload.get("code") not in (0, "0"):
+        return None
+    history = payload.get("history")
+    if not isinstance(history, list):
+        history = payload.get("list")
+    if not isinstance(history, list):
+        return None
+    today = (now or datetime.now(BEIJING_TZ)).astimezone(BEIJING_TZ).date()
+    total = 0.0
+    malformed = False
+    for row in history:
+        if not isinstance(row, dict) or row.get("business") not in {"system:checkin", "checkin", "check-in", "check_in"}:
+            continue
+        try:
+            if isinstance(row.get("time"), bool) or isinstance(row.get("change"), bool):
+                raise ValueError("invalid ledger number")
+            timestamp, change = float(row["time"]), float(row["change"])
+            if not math.isfinite(timestamp) or not math.isfinite(change):
+                raise ValueError("non-finite ledger number")
+            day = datetime.fromtimestamp(timestamp / 1000, BEIJING_TZ).date()
+        except (KeyError, TypeError, ValueError, OverflowError, OSError):
+            malformed = True
+            continue
+        if day == today and change > 0:
+            total += change
+    return total if total > 0 or not malformed else None
+
+
 def log_reject(code: int, raw: Dict, message: str, domain: str, log: Callable[..., None], ua_hint: str = "") -> None:
     """失败分支按 code 细分诊断，便于快速定位根因"""
     if code == 4:
@@ -797,6 +833,7 @@ class API:
         self.turnstile_required = False
         self.cloudflare_blocked = False
         self.cloudflare_hint = ""
+        self.today_points: Optional[float] = None
 
         if probing:
             self.timeout: Tuple[int, int] = (5, 10)
@@ -904,6 +941,8 @@ class API:
         data = self._json_dict(response, "积分")
         if data is None:
             return None
+
+        self.today_points = today_checkin_points(data)
 
         points = to_int(data.get("points"))
         if points is None:
@@ -1227,6 +1266,7 @@ class Report:
         """所有账号均成功或已签到才算本轮成功；空报告不能通过。"""
         return bool(self.entries) and not self.error and all(
             entry.result.code in (CheckinStatus.SUCCESS, CheckinStatus.REPEAT)
+            and entry.result.today_points is not None and entry.result.today_points > 0
             for entry in self.entries
         )
 
@@ -1256,6 +1296,7 @@ class Report:
                 line += f" · {r.exchange}"
             if r.note:
                 line += f"  ⚠️ {r.note}"
+            line += f" · 今日签到流水 {r.today_points:g} 积分" if r.today_points is not None else " · 今日签到流水待核对"
             lines.append(line)
 
         if self.error:
@@ -1411,6 +1452,12 @@ def write_actions_summary(report: Report) -> None:
         status = STATUS_META.get(result.code, STATUS_META[CheckinStatus.FAILURE])[1]
         domain = html.escape(result.domain)
         lines.append(f"- 账号 {entry.index}：{status}；{domain}；本次 {result.points} 积分；剩余 {format_days(result.days)}。")
+        if result.today_points is None:
+            lines.append("  - 官网今日签到入账尚未核实。")
+        elif result.today_points > 0:
+            lines.append(f"  - 已核对官网今日签到入账：{result.today_points:g} 积分；流水不能归因到某一次脚本。")
+        else:
+            lines.append("  - 官网可见流水中未发现今日签到入账。")
         if result.turnstile or "Cloudflare" in result.note or "Turnstile" in result.note:
             lines.append("  - 需要在官网完成验证；本次不保证获得完整积分。")
         elif result.code is CheckinStatus.SUCCESS and result.points <= 1:

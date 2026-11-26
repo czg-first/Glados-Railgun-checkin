@@ -1,0 +1,2 @@
+# Optional browser fallback; no saved profiles, cookies, traces or screenshots.
+playwright>=1.56,<2
